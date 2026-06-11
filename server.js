@@ -42,6 +42,7 @@ const chartRoutes = require("./src/routes/chartRoutes")
 const exportDocumentsToExcel =require('./src/routes/exportFile.Controller')
 const statisticRoutes = require('./src/routes/statisticRoutes')
 const googleRoutes = require('./src/routes/googleRouutes')
+const taskRoutes = require('./src/routes/taskRoutes')
 
 app.use('/authen', authRoutes);
 app.use('/departments',departmentRoutes);
@@ -54,6 +55,7 @@ app.use('/charts',chartRoutes);
 app.use('/exports', exportDocumentsToExcel)
 app.use('/statistics', statisticRoutes)
 app.use('/google', googleRoutes);
+app.use('/tasks', taskRoutes);
 
 
 

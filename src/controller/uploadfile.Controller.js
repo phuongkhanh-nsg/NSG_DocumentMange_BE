@@ -142,6 +142,10 @@ async function uploadToDrive(req, res) {
 
     await newDocument.save();
 
+    // Trigger notifications for new document
+    const { triggerDocumentNotifications } = require("../service/Notification.service");
+    triggerDocumentNotifications(newDocument);
+
     res.status(201).json({
       message: "Files uploaded successfully!",
       document: newDocument,
