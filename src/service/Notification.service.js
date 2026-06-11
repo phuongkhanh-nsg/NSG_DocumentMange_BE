@@ -1,41 +1,28 @@
 const { sendNewDocumentEmail } = require("./NodeMailer.service/email");
-const { sendNewDocumentZalo } = require("./Zalo.service");
 const User = require("../models/user.model");
 
 const triggerDocumentNotifications = async (document) => {
     try {
-        const userIdsToNotify = new Set();
-        
-        if (document.assignedToUsers && document.assignedToUsers.length > 0) {
-            document.assignedToUsers.forEach(u => userIdsToNotify.add(u.userId.toString()));
+        const { assignees, departmentExecutors } = document;
+        let targetUsers = [];
+
+        if (assignees && assignees.length > 0) {
+            const users = await User.find({ _id: { $in: assignees } }).select("email mobile");
+            targetUsers = [...targetUsers, ...users];
         }
 
-        if (document.executors && document.executors.length > 0) {
-            for (const exec of document.executors) {
-                if (exec.executorType === "User") {
-                    userIdsToNotify.add(exec.executorId.toString());
-                } else if (exec.executorType === "Department") {
-                    // Fetch all users in this department
-                    const deptUsers = await User.find({ department: exec.executorId, role: { $ne: null } }).select('_id');
-                    deptUsers.forEach(u => userIdsToNotify.add(u._id.toString()));
-                }
-            }
+        if (departmentExecutors && departmentExecutors.length > 0) {
+            const deptUsers = await User.find({ department: { $in: departmentExecutors } }).select("email mobile");
+            targetUsers = [...targetUsers, ...deptUsers];
         }
 
-        if (userIdsToNotify.size === 0) return;
+        const uniqueUsers = Array.from(new Set(targetUsers.map(u => u._id.toString())))
+            .map(id => targetUsers.find(u => u._id.toString() === id));
 
-        const users = await User.find({ _id: { $in: Array.from(userIdsToNotify) } }).select('email mobile');
-        
-        const emails = users.map(u => u.email).filter(e => e);
-        const phones = users.map(u => u.mobile).filter(p => p);
+        const emails = uniqueUsers.map(u => u.email).filter(e => e);
 
-        // Send notifications asynchronously
         if (emails.length > 0) {
             sendNewDocumentEmail(emails, document).catch(err => console.error("Email Notify Error:", err));
-        }
-
-        if (phones.length > 0) {
-            sendNewDocumentZalo(phones, document).catch(err => console.error("Zalo Notify Error:", err));
         }
 
     } catch (error) {
