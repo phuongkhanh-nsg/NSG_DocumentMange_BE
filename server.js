@@ -21,7 +21,11 @@ app.use(express.urlencoded({ extended: true, limit: '1000mb' }));
 app.use(cookieParser());
 
 const corsOptions = {
-    origin: ["http://localhost:5173" , "https://nsg-document-mange-fe.vercel.app",],
+    origin: [
+      "http://localhost:5173", 
+      "https://nsg-document-mange-fe.vercel.app",
+      "https://nsg-document-mange-fe-azure.vercel.app"
+    ],
     methods: ["GET", "POST", "PUT", "DELETE","PATCH"],
     credentials: true, // Allow sending cookies
 };
