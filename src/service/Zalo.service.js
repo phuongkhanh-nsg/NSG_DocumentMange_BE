@@ -1,4 +1,3 @@
-const axios = require('axios');
 const dotenv = require('dotenv');
 dotenv.config();
 
@@ -28,17 +27,19 @@ const sendNewDocumentZalo = async (phones, docData) => {
                 }
             };
             
-            await axios.post(url, data, {
+            await fetch(url, {
+                method: 'POST',
                 headers: {
                     'access_token': zaloToken,
                     'Content-Type': 'application/json'
-                }
+                },
+                body: JSON.stringify(data)
             });
             */
             console.log(`[STUB] Zalo notification sent to ${phone} for document ${docData.docCode}`);
         }
     } catch (error) {
-        console.error("Error sending Zalo notification:", error.response ? error.response.data : error.message);
+        console.error("Error sending Zalo notification:", error.message);
     }
 };
 
