@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 const User = require("./user.model");
 
@@ -132,7 +131,13 @@ const documentSchema = new mongoose.Schema(
     },
     receivedAt :{
       type: Date,
-    }
+    },
+    addedToCalendarBy: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      }
+    ],
   },
   {
     timestamps: true,

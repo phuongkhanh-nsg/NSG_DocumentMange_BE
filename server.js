@@ -13,6 +13,8 @@ const cors = require("cors");
 app.use(express.json({ limit: '1000mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1000mb' }));
 
+const { startTaskReminderCron } = require('./src/service/TaskCron.service');
+
 
 // Static file configuration
 // app.use(express.static(path.join(__dirname, 'public')));
@@ -24,7 +26,8 @@ const corsOptions = {
     origin: [
       "http://localhost:5173", 
       "https://nsg-document-mange-fe.vercel.app",
-      "https://nsg-document-mange-fe-azure.vercel.app"
+      "https://nsg-document-mange-fe-azure.vercel.app",
+      "https://vanban.nsg.edu.vn"
     ],
     methods: ["GET", "POST", "PUT", "DELETE","PATCH"],
     credentials: true, // Allow sending cookies
@@ -43,6 +46,8 @@ const exportDocumentsToExcel =require('./src/routes/exportFile.Controller')
 const statisticRoutes = require('./src/routes/statisticRoutes')
 const googleRoutes = require('./src/routes/googleRouutes')
 const taskRoutes = require('./src/routes/taskRoutes')
+const chatbotConfigRoutes = require('./src/routes/chatbotConfig.routes');
+const chatbotRoutes = require('./src/routes/chatbot.routes');
 
 app.use('/authen', authRoutes);
 app.use('/departments',departmentRoutes);
@@ -56,8 +61,8 @@ app.use('/exports', exportDocumentsToExcel)
 app.use('/statistics', statisticRoutes)
 app.use('/google', googleRoutes);
 app.use('/tasks', taskRoutes);
-
-
+app.use('/chatbot-config', chatbotConfigRoutes);
+app.use('/chatbot', chatbotRoutes);
 
 app.get("/test", (req, res) => {
   res.json({message: "Hello World! Backend is online successfully (28/04)."});
@@ -66,6 +71,7 @@ app.get("/test", (req, res) => {
 (async () => {
     try {
       await connection();
+      startTaskReminderCron();
       if (process.env.NODE_ENV !== 'production') {
         app.listen(port, () => {
           console.log(`Ứng dụng mẫu đang nghe trên cổng http://localhost:${port}`);

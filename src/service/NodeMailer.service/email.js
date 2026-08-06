@@ -1,4 +1,4 @@
-const { TEMPPASSWORD_EMAIL_TEMPLATE, NEW_DOCUMENT_EMAIL_TEMPLATE } = require("./emailTemplate");
+const { TEMPPASSWORD_EMAIL_TEMPLATE, NEW_DOCUMENT_EMAIL_TEMPLATE, TASK_NOTIFICATION_EMAIL_TEMPLATE } = require("./emailTemplate");
 const nodemailer = require("nodemailer");
 const dotenv = require("dotenv");
 dotenv.config();
@@ -34,31 +34,194 @@ const sentTempPassword = async (email,tempPass) => {
     }
 }
 
-const sendNewDocumentEmail = async (emails, docData) => {
+const sendNewDocumentEmail = async (uniqueUsers, docData, senderName = "Hệ thống") => {
     try {
-        if (!emails || emails.length === 0) return;
+        if (!uniqueUsers || uniqueUsers.length === 0) return;
         const transporter = createTransporter();
         
-        let htmlContent = NEW_DOCUMENT_EMAIL_TEMPLATE
-            .replace("{docCode}", docData.docCode || "N/A")
-            .replace("{shortDescription}", docData.shortDescription || "N/A")
-            .replace("{docType}", docData.docType === "received" ? "Văn bản đến" : "Văn bản đi")
-            .replace("{urgency}", docData.urgency || "Bình thường");
-
-        const mailOptions = {
-            from: '"Hệ thống quản lý văn bản NSG" <qlvb@nsgpc.edu.vn>',
-            to: emails.join(", "), 
-            subject: "[NSG] Thông báo văn bản mới",
-            html: htmlContent,
+        let linksHtml = "";
+        if (docData.files && docData.files.length > 0) {
+            linksHtml = docData.files.map(f => 
+                `<li><a href="https://drive.google.com/file/d/${f.fileId}/view" target="_blank">${f.fileName || 'Xem file'}</a></li>`
+            ).join('');
+        } else {
+            linksHtml = "<li>Không có file đính kèm</li>";
         }
-        const info = await transporter.sendMail(mailOptions);
-        return info;
+
+        const dateValue = docData.receivedAt ? 
+            new Date(docData.receivedAt).toLocaleDateString('vi-VN') : 
+            (docData.createAt ? new Date(docData.createAt).toLocaleDateString('vi-VN') : "N/A");
+            
+        const deadlineValue = docData.deadlineDay ? 
+            new Date(docData.deadlineDay).toLocaleDateString('vi-VN') : "Không có";
+
+        const fullDocCode = (docData.docNum && docData.docCode) 
+            ? `${docData.docNum}/${docData.docCode}` 
+            : (docData.docNum || docData.docCode || "N/A");
+
+        const subject = `${fullDocCode} - ${docData.shortDescription || "N/A"}`;
+
+        for (const user of uniqueUsers) {
+            if (!user.email) continue;
+            
+            let htmlContent = NEW_DOCUMENT_EMAIL_TEMPLATE
+                .replace("{recipientName}", user.name || "Bạn")
+                .replace("{senderName}", senderName)
+                .replace("{docCode}", fullDocCode)
+                .replace("{shortDescription}", docData.shortDescription || "N/A")
+                .replace("{docType}", docData.docType === "received" ? "Văn bản đến" : "Văn bản đi")
+                .replace("{urgency}", docData.urgency || "Bình thường")
+                .replace("{dateValue}", dateValue)
+                .replace("{principalIdea}", docData.principalIdea || "N/A")
+                .replace("{deadlineDay}", deadlineValue)
+                .replace("{linksHtml}", linksHtml);
+    
+            const mailOptions = {
+                from: '"Hệ thống quản lý văn bản NSG" <qlvb@nsgpc.edu.vn>',
+                to: user.email, 
+                subject: subject,
+                html: htmlContent,
+            }
+            await transporter.sendMail(mailOptions).catch(err => console.error(`Error sending email to ${user.email}:`, err));
+        }
+        return true;
     } catch (error) {
         console.error("Error sending document notification to email:", error);
     }
 }
 
+const sendTaskReminderEmail = async (email, taskData, reminderType) => {
+    try {
+        if (!email) return;
+        const transporter = createTransporter();
+        
+        let subject = "";
+        let headerTitle = "";
+        let color = "#333";
+        
+        if (reminderType === "near_deadline") {
+            subject = `[Nhắc nhở] Công việc sắp đến hạn: ${taskData.title}`;
+            headerTitle = "Công việc của bạn sắp đến hạn";
+            color = "#f39c12"; // Orange
+        } else if (reminderType === "due_today") {
+            subject = `[Khẩn cấp] Công việc đến hạn hôm nay: ${taskData.title}`;
+            headerTitle = "Công việc của bạn ĐẾN HẠN TRONG HÔM NAY";
+            color = "#e74c3c"; // Red
+        } else if (reminderType === "overdue") {
+            subject = `[Quá hạn] Công việc đã quá hạn: ${taskData.title}`;
+            headerTitle = "Công việc của bạn ĐÃ QUÁ HẠN";
+            color = "#c0392b"; // Dark Red
+        }
+
+        const endDateStr = new Date(taskData.endDate).toLocaleDateString('vi-VN');
+
+        const htmlContent = `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
+            <h2 style="color: ${color}; text-align: center; border-bottom: 2px solid ${color}; padding-bottom: 10px;">${headerTitle}</h2>
+            <p>Xin chào,</p>
+            <p>Hệ thống xin thông báo về tình trạng công việc được giao cho bạn:</p>
+            <div style="background-color: #f9f9f9; padding: 15px; border-left: 4px solid ${color}; margin-top: 20px;">
+                <p><strong>Tên công việc:</strong> ${taskData.title}</p>
+                <p><strong>Nội dung:</strong> ${taskData.description || "Không có"}</p>
+                <p><strong>Hạn hoàn thành:</strong> <span style="color: ${color}; font-weight: bold;">${endDateStr}</span></p>
+            </div>
+            <p style="margin-top: 20px;">Vui lòng truy cập hệ thống Quản lý Văn bản NSG để cập nhật tiến độ công việc.</p>
+            <p style="color: #888; font-size: 12px; margin-top: 30px; text-align: center;">Đây là email tự động từ hệ thống, vui lòng không trả lời email này.</p>
+        </div>`;
+
+        const mailOptions = {
+            from: '"Hệ thống quản lý văn bản NSG" <qlvb@nsgpc.edu.vn>',
+            to: email, 
+            subject: subject,
+            html: htmlContent,
+        }
+        await transporter.sendMail(mailOptions);
+        return true;
+    } catch (error) {
+        console.error("Error sending task reminder email:", error);
+    }
+}
+
+const sendTaskNotificationEmail = async (uniqueUsers, taskData, actionType) => {
+    try {
+        if (!uniqueUsers || uniqueUsers.length === 0) return;
+        const transporter = createTransporter();
+        
+        let actionName = "Cập nhật công việc";
+        if (actionType === 'create') actionName = "Tạo công việc mới";
+        if (actionType === 'status_change') actionName = "Thay đổi trạng thái công việc";
+
+        let linksHtml = "";
+        if (taskData.files && taskData.files.length > 0) {
+            linksHtml = taskData.files.map(f => 
+                `<li><a href="https://drive.google.com/file/d/${f.fileId}/view" target="_blank">${f.fileName}</a></li>`
+            ).join('');
+        } else {
+            linksHtml = "<li>Không có file đính kèm</li>";
+        }
+
+        const dateValue = taskData.startDate && taskData.endDate ? 
+            `${new Date(taskData.startDate).toLocaleDateString('vi-VN')} - ${new Date(taskData.endDate).toLocaleDateString('vi-VN')}` : "N/A";
+
+        let priorityLabel = "Bình thường";
+        let priorityHighlightBlock = "";
+        
+        if (taskData.priority === 'FLASH') {
+            priorityLabel = "Hỏa tốc";
+            priorityHighlightBlock = `<div style="background-color: #ffebee; border-left: 4px solid #f44336; padding: 15px; margin: 20px 0;">
+                <strong style="color: #f44336; font-size: 16px;">🚨 Khẩn cấp: Công việc Hỏa tốc!</strong>
+                <p style="margin: 5px 0 0 0; color: #d32f2f;">Công việc này mang tính chất Hỏa tốc, yêu cầu sự ưu tiên xử lý ngay lập tức.</p>
+            </div>`;
+        } else if (taskData.priority === 'URGENT') {
+            priorityLabel = "Khẩn";
+            priorityHighlightBlock = `<div style="background-color: #fff3e0; border-left: 4px solid #ff9800; padding: 15px; margin: 20px 0;">
+                <strong style="color: #f57c00; font-size: 16px;">⚠️ Chú ý: Công việc Khẩn!</strong>
+                <p style="margin: 5px 0 0 0; color: #e65100;">Công việc này mang tính chất Khẩn, vui lòng ưu tiên xử lý sớm.</p>
+            </div>`;
+        }
+
+        let statusLabel = "Chưa làm";
+        if (taskData.status === 'IN_PROGRESS') statusLabel = "Đang làm";
+        if (taskData.status === 'DONE') statusLabel = "Hoàn thành";
+
+        const assigneesList = (taskData.assignees || []).map(u => u.name).join(', ') || "N/A";
+        const collaboratorsList = (taskData.collaborators || []).map(u => u.name).join(', ') || "N/A";
+
+        const subject = `[${actionName}] ${taskData.title}`;
+
+        for (const user of uniqueUsers) {
+            if (!user.email) continue;
+            
+            let htmlContent = TASK_NOTIFICATION_EMAIL_TEMPLATE
+                .replace(/{recipientName}/g, user.name || "Bạn")
+                .replace(/{actionName}/g, actionName)
+                .replace(/{priorityHighlightBlock}/g, priorityHighlightBlock)
+                .replace(/{taskTitle}/g, taskData.title || "N/A")
+                .replace(/{taskDescription}/g, taskData.description || "Không có")
+                .replace(/{taskTime}/g, dateValue)
+                .replace(/{priorityLabel}/g, priorityLabel)
+                .replace(/{statusLabel}/g, statusLabel)
+                .replace(/{assigneesList}/g, assigneesList)
+                .replace(/{collaboratorsList}/g, collaboratorsList)
+                .replace(/{linksHtml}/g, linksHtml);
+    
+            const mailOptions = {
+                from: '"Hệ thống quản lý văn bản NSG" <qlvb@nsgpc.edu.vn>',
+                to: user.email, 
+                subject: subject,
+                html: htmlContent,
+            }
+            await transporter.sendMail(mailOptions).catch(err => console.error(`Error sending email to ${user.email}:`, err));
+        }
+        return true;
+    } catch (error) {
+        console.error("Error sending task notification to email:", error);
+    }
+}
+
 module.exports = {
     sentTempPassword,
-    sendNewDocumentEmail
+    sendNewDocumentEmail,
+    sendTaskReminderEmail,
+    sendTaskNotificationEmail
 }

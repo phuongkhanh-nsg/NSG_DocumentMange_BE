@@ -11,14 +11,84 @@ dotenv.config();
 
 // Google Drive Authentication
 async function authorize() {
-    const auth = new google.auth.JWT(
-        process.env.GOOGLE_CLIENT_EMAIL,
-        null,       
-        process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"), // Fix line breaks in private key
-        ["https://www.googleapis.com/auth/drive"]
+    const adminEmail = process.env.GOOGLE_ADMIN_EMAIL || 'qlvb@nsgpc.edu.vn';
+    const user = await User.findOne({ email: adminEmail, 'google.refreshToken': { $ne: null } });
+    
+    if (!user) {
+      throw new Error(`Admin account (${adminEmail}) has not authorized Google Drive.`);
+    }
+
+    const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        process.env.GOOGLE_REDIRECT_URI
     );
-    await auth.authorize();
-    return auth;
+
+    oauth2Client.setCredentials({
+        access_token: user.google.accessToken,
+        refresh_token: user.google.refreshToken,
+    });
+    
+    return oauth2Client;
+}
+
+// Helper function to sanitize file names
+function sanitizeFileName(str) {
+  if (!str) return "";
+  str = str.replace(/à|á|ạ|ả|ã|â|ầ|ấ|ậ|ẩ|ẫ|ă|ằ|ắ|ặ|ẳ|ẵ/g, "a");
+  str = str.replace(/è|é|ẹ|ẻ|ẽ|ê|ề|ế|ệ|ể|ễ/g, "e");
+  str = str.replace(/ì|í|ị|ỉ|ĩ/g, "i");
+  str = str.replace(/ò|ó|ọ|ỏ|õ|ô|ồ|ố|ộ|ổ|ỗ|ơ|ờ|ớ|ợ|ở|ỡ/g, "o");
+  str = str.replace(/ù|ú|ụ|ủ|ũ|ư|ừ|ứ|ự|ử|ữ/g, "u");
+  str = str.replace(/ỳ|ý|ỵ|ỷ|ỹ/g, "y");
+  str = str.replace(/đ/g, "d");
+  str = str.replace(/À|Á|Ạ|Ả|Ã|Â|Ầ|Ấ|Ậ|Ẩ|Ẫ|Ă|Ằ|Ắ|Ặ|Ẳ|Ẵ/g, "A");
+  str = str.replace(/È|É|Ẹ|Ẻ|Ẽ|Ê|Ề|Ế|Ệ|Ể|Ễ/g, "E");
+  str = str.replace(/Ì|Í|Ị|Ỉ|Ĩ/g, "I");
+  str = str.replace(/Ò|Ó|Ọ|Ỏ|Õ|Ô|Ồ|Ố|Ộ|Ổ|Ỗ|Ơ|Ờ|Ớ|Ợ|Ở|Ỡ/g, "O");
+  str = str.replace(/Ù|Ú|Ụ|Ủ|Ũ|Ư|Ừ|Ứ|Ự|Ử|Ữ/g, "U");
+  str = str.replace(/Ỳ|Ý|Ỵ|Ỷ|Ỹ/g, "Y");
+  str = str.replace(/Đ/g, "D");
+  str = str.replace(/\u0300|\u0301|\u0303|\u0309|\u0323/g, ""); // ̀ ́ ̃ ̉ ̣  huyền, sắc, ngã, hỏi, nặng
+  str = str.replace(/\u02C6|\u0306|\u031B/g, ""); // ˆ ̆ ̛  Â, Ê, Ă, Ơ, Ư
+  // Remove special characters, replace spaces with hyphens
+  str = str.replace(/!|@|%|\^|\*|\(|\)|\+|\=|\<|\>|\?|\/|,|\:|\;|\'|\"|\&|\#|\[|\]|~|\$|_|`|{|}|\||\\/g, "-");
+  str = str.replace(/ +/g, " ");
+  str = str.trim();
+  str = str.replace(/\s+/g, '-');
+  str = str.replace(/-+/g, '-');
+  return str;
+}
+
+// Helper function to get or create a folder like "YYYY-MM"
+async function getOrCreateMonthFolder(drive) {
+  const date = new Date();
+  const folderName = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  const parentId = process.env.DRIVE_FOLDER_ID;
+
+  const query = `name='${folderName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const response = await drive.files.list({
+    q: query,
+    fields: 'files(id, name)',
+    spaces: 'drive',
+  });
+
+  if (response.data.files && response.data.files.length > 0) {
+    return response.data.files[0].id;
+  }
+
+  const folderMetadata = {
+    name: folderName,
+    mimeType: 'application/vnd.google-apps.folder',
+    parents: [parentId],
+  };
+
+  const createResponse = await drive.files.create({
+    resource: folderMetadata,
+    fields: 'id',
+  });
+
+  return createResponse.data.id;
 }
 
 async function uploadToDrive(req, res) {
@@ -54,7 +124,8 @@ async function uploadToDrive(req, res) {
       saveAt,
       executors,
       createAt,
-      receivedAt
+      receivedAt,
+      repliedDocId
     } = req.body;
 
     if (!sentBy ) {
@@ -63,10 +134,14 @@ async function uploadToDrive(req, res) {
 
     if (docType === 'received' && signer == null) 
     {
-      const signerUser = await User.findOne({ position: "680eb8eaf148d83d0fd5344a" });
+      const hieuTruongPosition = await mongoose.model('Position').findOne({ positionName: 'Hiệu trưởng' });
+      if (!hieuTruongPosition) {
+          throw new Error("Không tìm thấy chức vụ Hiệu trưởng trong hệ thống");
+      }
+      const signerUser = await User.findOne({ position: hieuTruongPosition._id });
 
       if (!signerUser) {
-          throw new Error("Không tìm thấy user với position = hiệu trưởng");
+          throw new Error("Không tìm thấy user với chức vụ = Hiệu trưởng");
       }
 
       signer = signerUser._id;
@@ -87,30 +162,52 @@ async function uploadToDrive(req, res) {
     }
 
     const uploadedFiles = [];
+      
+    // Xử lý existingFiles từ req.body
+    if (req.body.existingFiles) {
+      try {
+        const parsedExistingFiles = JSON.parse(req.body.existingFiles);
+        if (Array.isArray(parsedExistingFiles)) {
+          uploadedFiles.push(...parsedExistingFiles.map(file => ({
+            fileId: file.fileId,
+            fileName: file.fileName,
+            mimeType: file.mimeType,
+            size: file.size || '',
+            uploadedByName: file.uploadedByName || "Hệ thống",
+            uploadDate: file.uploadDate || new Date()
+          })));
+        }
+      } catch (error) {
+        console.error("Invalid format for existingFiles in uploadToDrive", error);
+      }
+    }
+    if (req.files && req.files.length > 0) {
+      const monthFolderId = await getOrCreateMonthFolder(drive);
 
-    for (const file of req.files) {
-      const fileMetadata = {
-        name: file.originalname,
-        parents: [process.env.DRIVE_FOLDER_ID],
-      };
+      for (const file of req.files) {
+        const fileMetadata = {
+          name: sanitizeFileName(file.originalname),
+          parents: [monthFolderId],
+        };
 
-      const media = {
-        mimeType: file.mimetype,
-        body: Readable.from(file.buffer),
-      };
+        const media = {
+          mimeType: file.mimetype,
+          body: Readable.from(file.buffer),
+        };
 
-      const response = await drive.files.create({
-        resource: fileMetadata,
-        media: media,
-        fields: "id, name, mimeType, size",
-      });
+        const response = await drive.files.create({
+          resource: fileMetadata,
+          media: media,
+          fields: "id, name, mimeType, size",
+        });
 
-      uploadedFiles.push({
-        fileId: response.data.id,
-        fileName: response.data.name,
-        mimeType: response.data.mimeType,
-        size: response.data.size,
-      });
+        uploadedFiles.push({
+          fileId: response.data.id,
+          fileName: response.data.name,
+          mimeType: response.data.mimeType,
+          size: response.data.size,
+        });
+      }
     }
 
     // Save document to MongoDB
@@ -141,6 +238,16 @@ async function uploadToDrive(req, res) {
     });
 
     await newDocument.save();
+
+    // Nếu văn bản này được phát hành từ một văn bản trình ký, cập nhật trạng thái isIssued
+    if (repliedDocId) {
+      try {
+        const RepliedDoc = require("../models/repliedDoc.model");
+        await RepliedDoc.findByIdAndUpdate(repliedDocId, { isIssued: true });
+      } catch (err) {
+        console.error("Error updating RepliedDoc isIssued state:", err);
+      }
+    }
 
     // Trigger notifications for new document
     const { triggerDocumentNotifications } = require("../service/Notification.service");
@@ -693,10 +800,11 @@ async function updateDocument(req, res) {
   
       // Thêm file mới nếu có
       if (req.files && req.files.length > 0) {
+        const monthFolderId = await getOrCreateMonthFolder(drive);
         for (const file of req.files) {
           const fileMetadata = {
-            name: file.originalname,
-            parents: [process.env.DRIVE_FOLDER_ID],
+            name: sanitizeFileName(file.originalname),
+            parents: [monthFolderId],
           };
   
           const media = {
@@ -723,6 +831,9 @@ async function updateDocument(req, res) {
       existingDocument.files = updatedFiles;
   
       await existingDocument.save();
+
+      const { syncCalendarForDocument } = require("../service/Notification.service");
+      await syncCalendarForDocument(existingDocument);
   
       res.status(200).json({
         message: "Document updated successfully!",
@@ -915,11 +1026,61 @@ function escapeRegex(text = "") {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const removeVietnameseTones = (str) => {
+    str = str.replace(/à|á|ạ|ả|ã|â|ầ|ấ|ậ|ẩ|ẫ|ă|ằ|ắ|ặ|ẳ|ẵ/g,"a"); 
+    str = str.replace(/è|é|ẹ|ẻ|ẽ|ê|ề|ế|ệ|ể|ễ/g,"e"); 
+    str = str.replace(/ì|í|ị|ỉ|ĩ/g,"i"); 
+    str = str.replace(/ò|ó|ọ|ỏ|õ|ô|ồ|ố|ộ|ổ|ỗ|ơ|ờ|ớ|ợ|ở|ỡ/g,"o"); 
+    str = str.replace(/ù|ú|ụ|ủ|ũ|ư|ừ|ứ|ự|ử|ữ/g,"u"); 
+    str = str.replace(/ỳ|ý|ỵ|ỷ|ỹ/g,"y"); 
+    str = str.replace(/đ/g,"d");
+    str = str.replace(/À|Á|Ạ|Ả|Ã|Â|Ầ|Ấ|Ậ|Ẩ|Ẫ|Ă|Ằ|Ắ|Ặ|Ẳ|Ẵ/g, "A");
+    str = str.replace(/È|É|Ẹ|Ẻ|Ẽ|Ê|Ề|Ế|Ệ|Ể|Ễ/g, "E");
+    str = str.replace(/Ì|Í|Ị|Ỉ|Ĩ/g, "I");
+    str = str.replace(/Ò|Ó|Ọ|Ỏ|Õ|Ô|Ồ|Ố|Ộ|Ổ|Ỗ|Ơ|Ờ|Ớ|Ợ|Ở|Ỡ/g, "O");
+    str = str.replace(/Ù|Ú|Ụ|Ủ|Ũ|Ư|Ừ|Ứ|Ự|Ử|Ữ/g, "U");
+    str = str.replace(/Ỳ|Ý|Ỵ|Ỷ|Ỹ/g, "Y");
+    str = str.replace(/Đ/g, "D");
+    return str;
+};
+
+const createVietnameseRegex = (keyword) => {
+    if (!keyword) return '';
+    const normalized = removeVietnameseTones(keyword.trim().toLowerCase());
+    
+    const charMap = {
+        'a': '[aAàÀáÁạẠảẢãÃâÂầẦấẤậẬẩẨẫẪăĂằẰắẮặẶẳẲẵẴ]',
+        'e': '[eEèÈéÉẹẸẻẺẽẼêÊềỀếẾệỆểỂễỄ]',
+        'i': '[iIìÌíÍịỊỉỈĩĨ]',
+        'o': '[oOòÒóÓọỌỏỎõÕôÔồỒốỐộỘổỔỗỖơƠờỜớỚợỢởỞỡỠ]',
+        'u': '[uUùÙúÚụỤủỦũŨưƯừỪứỨựỰửỬữỮ]',
+        'y': '[yYỳỲýÝỵỴỷỶỹỸ]',
+        'd': '[dDđĐ]'
+    };
+
+    let regexStr = '';
+    for (let i = 0; i < normalized.length; i++) {
+        const char = normalized[i];
+        if (charMap[char]) {
+            regexStr += charMap[char];
+        } else if (/[a-z0-9]/.test(char)) {
+            regexStr += char;
+        } else if (char === ' ') {
+            regexStr += '\\s+';
+        } else {
+            regexStr += escapeRegex(char);
+        }
+    }
+    
+    regexStr = regexStr.replace(/(?:\\s\+)+/g, '\\s+');
+    
+    return regexStr;
+};
+
 const searchDocuments = async(req, res) => {
   try {
     const {
-      soKyHieu, // ví dụ "63/KH-NSG"
-      shortDescription,
+      keyword,
       executors, // id hoặc danh sách id
       docType,
       docVariant, // loại văn bản
@@ -941,29 +1102,31 @@ const searchDocuments = async(req, res) => {
 
     const filter = {};
 
-    // ===== Số/Ký hiệu =====
-    if (soKyHieu) {
-      if (soKyHieu.includes("/")) {
-        // vd "63/KH-NSG"
-        const [numPart, codePart] = soKyHieu.split("/");
+    // ===== Tìm kiếm chung: Số/Ký hiệu & Trích yếu =====
+    if (keyword) {
+      const regex = new RegExp(createVietnameseRegex(keyword), "i");
+      const orConditions = [
+        { shortDescription: regex }
+      ];
+      
+      if (keyword.includes("/")) {
+        const [numPart, codePart] = keyword.split("/");
         const num = Number(numPart);
-        const codeRegex = new RegExp("^" + escapeRegex(codePart.trim()), "i");
-        filter.$and = [
-          { docNum: num },
-          { docCode: codeRegex }
-        ];
-      } else if (!isNaN(Number(soKyHieu))) {
-        // chỉ số
-        filter.docNum = Number(soKyHieu);
+        if (!isNaN(num)) {
+          const codeRegex = new RegExp("^" + createVietnameseRegex(codePart.trim()), "i");
+          orConditions.push({ docNum: num, docCode: codeRegex });
+        } else {
+          orConditions.push({ docCode: regex });
+        }
+      } else if (!isNaN(Number(keyword)) && Number(keyword) > 0) {
+        orConditions.push({ docNum: Number(keyword) });
+        orConditions.push({ docCode: regex });
       } else {
-        // chỉ code
-        filter.docCode = new RegExp(escapeRegex(soKyHieu), "i");
+        orConditions.push({ docCode: regex });
       }
-    }
-
-    // ===== Trích yếu =====
-    if (shortDescription) {
-      filter.shortDescription = new RegExp(escapeRegex(shortDescription), "i");
+      
+      if (!filter.$and) filter.$and = [];
+      filter.$and.push({ $or: orConditions });
     }
 
     // ===== Đơn vị/Người nhận (executors) =====

@@ -19,6 +19,6 @@ router.post('/reviewerAction', verifyToken, repliedDocController.reviewerAction)
 router.get('/reviewed', verifyToken, repliedDocController.getReviewedDoc);
 router.get('/count/inReview', verifyToken, repliedDocController.countInReviewReplyDocs);
 router.get('/:repliedDocId', verifyToken, repliedDocController.getRepliedDocById);
-
+router.get('/download/:fileId', verifyToken, repliedDocController.downloadDocument);
 
 module.exports = router;

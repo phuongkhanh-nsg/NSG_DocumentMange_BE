@@ -2,6 +2,7 @@ const { google } = require("googleapis");
 const mongoose = require("mongoose");
 const User = mongoose.model("User");
 const Document = mongoose.model("Document");
+const { generateToken } = require("../service/Token.service/Token");
 
 const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
@@ -9,49 +10,100 @@ const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_REDIRECT_URI
     );
 
-// 1. Lấy URL để user login Google
-async function  getGoogleAuthUrl  (req, res) {
+// 1. Lấy URL để user login Google (cho mục đích ủy quyền Calendar)
+async function getGoogleAuthUrl(req, res) {
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
-    scope: ["https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
+    scope: [
+        "https://www.googleapis.com/auth/calendar.events", 
+        "https://www.googleapis.com/auth/userinfo.email", 
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/drive"
+      ],
+    state: "authorize"
+  });
+  res.json({ url });
+};
+
+// Lấy URL cho mục đích Đăng nhập vào hệ thống
+async function getGoogleAuthLoginUrl(req, res) {
+  const url = oauth2Client.generateAuthUrl({
+    access_type: "offline",
+    prompt: "consent",
+    scope: [
+        "https://www.googleapis.com/auth/userinfo.email", 
+        "https://www.googleapis.com/auth/userinfo.profile"
+      ],
+    state: "login"
   });
   res.json({ url });
 };
 
 // 2. Callback sau khi user đồng ý
- const googleCallback = async (req, res) => {
+const googleCallback = async (req, res) => {
   try {
-    const { code } = req.query;
+    const { code, state } = req.query;
     
-    // 🔥 KHỞI TẠO LẠI CLIENT TẠI ĐÂY
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
       process.env.GOOGLE_REDIRECT_URI
     );
    
-
     const { tokens } = await oauth2Client.getToken(code);
     oauth2Client.setCredentials(tokens);
 
     const oauth2 = google.oauth2({ auth: oauth2Client, version: "v2" });
     const { data: profile } = await oauth2.userinfo.get();
 
-    await User.findOneAndUpdate(
-      { email: profile.email },
-      {
-        $set: {
-          "google.googleId": profile.id,
-          "google.accessToken": tokens.access_token,
-          "google.refreshToken": tokens.refresh_token,
-          "google.tokenExpiryDate": tokens.expiry_date ? new Date(tokens.expiry_date) : null,
-        },
-      },
-      { upsert: true, new: true }
-    );
+    if (state === "login") {
+      // Logic đăng nhập
+      const user = await User.findOne({ email: profile.email });
+      if (!user) {
+        // Tài khoản không tồn tại trong hệ thống
+        const feOrigin = process.env.FE_URL ? new URL(process.env.FE_URL).origin : 'http://localhost:5173';
+        return res.redirect(`${feOrigin}/login?error=account_not_found`);
+      }
+      
+      // Đăng nhập thành công, tạo JWT
+      const { accessToken } = generateToken(user._id, user.role);
+      
+      // Update Google tokens in case they granted them previously
+      if (tokens.refresh_token) {
+        await User.updateOne(
+          { _id: user._id },
+          {
+            $set: {
+              "google.googleId": profile.id,
+              "google.accessToken": tokens.access_token,
+              "google.refreshToken": tokens.refresh_token,
+              "google.tokenExpiryDate": tokens.expiry_date ? new Date(tokens.expiry_date) : null
+            }
+          }
+        );
+      }
 
-     res.redirect(process.env.FE_URL);
+      const feOrigin = process.env.FE_URL ? new URL(process.env.FE_URL).origin : 'http://localhost:5173';
+      return res.redirect(`${feOrigin}/login?token=${accessToken}&name=${encodeURIComponent(user.name)}`);
+    } else {
+      // Logic ủy quyền (Authorize) từ trang Profile
+      await User.findOneAndUpdate(
+        { email: profile.email },
+        {
+          $set: {
+            "google.googleId": profile.id,
+            "google.accessToken": tokens.access_token,
+            "google.refreshToken": tokens.refresh_token,
+            "google.tokenExpiryDate": tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+          },
+        },
+        { upsert: true, new: true } // Vẫn giữ nguyên logic cũ nếu muốn
+      );
+
+      const feOrigin = process.env.FE_URL ? new URL(process.env.FE_URL).origin : 'http://localhost:5173';
+      return res.redirect(`${feOrigin}/members`);
+    }
   } catch (error) {
     console.error("Google Callback Error:", error);
     res.status(500).json({ error: "Authentication failed" });
@@ -120,9 +172,21 @@ const addCalendarEvent = async (req, res) => {
     if (endDateTime <= startDateTime) {
       endDateTime = new Date(startDateTime.getTime() + 60 * 60 * 1000); // +1 giờ
     }
+
+    let fileLinksText = "";
+    if (document.files && document.files.length > 0) {
+      fileLinksText = "\n\nTệp đính kèm:\n" + document.files.map(f => `- ${f.fileName}: https://drive.google.com/file/d/${f.fileId}/view`).join("\n");
+    }
+
+    const feOrigin = process.env.FE_URL ? new URL(process.env.FE_URL).origin : 'http://localhost:5173';
+    const docLink = `${feOrigin}/documents/${document.docType === 'sent' ? 'SentDocumentList' : 'ReceivedDocumentList'}`;
+    const fullDocCode = (document.docNum && document.docCode) 
+        ? `${document.docNum}/${document.docCode}` 
+        : (document.docNum || document.docCode || 'N/A');
+
     const event = {
-      summary: `${document.docNum}/${document.docCode} - ${document.shortDescription}`,
-      description: document.note,
+      summary: `${fullDocCode} - ${document.shortDescription}`,
+      description: (document.note || "") + `\n\nLink VB: ${docLink}` + fileLinksText,
       start: { 
         dateTime: startDateTime.toISOString(), 
         timeZone: "Asia/Ho_Chi_Minh" 
@@ -144,6 +208,14 @@ const addCalendarEvent = async (req, res) => {
       calendarId: "primary",
       requestBody: event,
     });
+
+    if (!document.addedToCalendarBy) {
+      document.addedToCalendarBy = [];
+    }
+    if (!document.addedToCalendarBy.includes(userId)) {
+      document.addedToCalendarBy.push(userId);
+      await document.save();
+    }
 
     res.json({ 
       success: true,
@@ -185,9 +257,23 @@ const checkGoogleAuth = async (req, res) => {
     res.status(500).json({ error: "Failed to check google auth" });
   }
 }
+
+const revokeGoogleAuth = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    await User.findByIdAndUpdate(userId, { $unset: { google: 1 } });
+    return res.status(200).json({ message: "Đã hủy ủy quyền Google Calendar thành công." });
+  } catch (error) {
+    console.error("Error revoking google auth:", error);
+    res.status(500).json({ error: "Failed to revoke google auth" });
+  }
+}
+
 module.exports = {
   getGoogleAuthUrl,
+  getGoogleAuthLoginUrl,
   googleCallback,
   addCalendarEvent,
-  checkGoogleAuth
+  checkGoogleAuth,
+  revokeGoogleAuth
 };

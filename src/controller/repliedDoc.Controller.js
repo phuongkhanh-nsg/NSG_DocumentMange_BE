@@ -1,5 +1,8 @@
 const { google } = require("googleapis");
 const fs = require("fs");
+const path = require("path");
+const os = require("os");
+const { exec } = require("child_process");
 const mongoose = require("mongoose");
 const RepliedDoc = require("../models/repliedDoc.model");
 const Document = require("../models/document.model");
@@ -8,15 +11,58 @@ const dotenv = require("dotenv");
 const { Readable } = require("stream");
 dotenv.config();
 
+// Google Drive Authentication
 async function authorize() {
-    const auth = new google.auth.JWT(
-        process.env.GOOGLE_CLIENT_EMAIL,
-        null,       
-        process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"), // Fix line breaks in private key
-        ["https://www.googleapis.com/auth/drive"]
+    const adminEmail = process.env.GOOGLE_ADMIN_EMAIL || 'qlvb@nsgpc.edu.vn';
+    const user = await User.findOne({ email: adminEmail, 'google.refreshToken': { $ne: null } });
+    
+    if (!user) {
+      throw new Error(`Admin account (${adminEmail}) has not authorized Google Drive.`);
+    }
+
+    const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        process.env.GOOGLE_REDIRECT_URI
     );
-    await auth.authorize();
-    return auth;
+
+    oauth2Client.setCredentials({
+        access_token: user.google.accessToken,
+        refresh_token: user.google.refreshToken,
+    });
+    
+    return oauth2Client;
+}
+
+// Helper function to get or create a folder like "YYYY-MM"
+async function getOrCreateMonthFolder(drive) {
+  const date = new Date();
+  const folderName = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  const parentId = process.env.DRIVE_FOLDER_ID;
+
+  const query = `name='${folderName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const response = await drive.files.list({
+    q: query,
+    fields: 'files(id, name)',
+    spaces: 'drive',
+  });
+
+  if (response.data.files && response.data.files.length > 0) {
+    return response.data.files[0].id;
+  }
+
+  const folderMetadata = {
+    name: folderName,
+    mimeType: 'application/vnd.google-apps.folder',
+    parents: [parentId],
+  };
+
+  const createResponse = await drive.files.create({
+    resource: folderMetadata,
+    fields: 'id',
+  });
+
+  return createResponse.data.id;
 }
 
 const replyDoc = async (req, res) => {
@@ -97,11 +143,12 @@ const replyDoc = async (req, res) => {
             };
         });
 
-        const uploadedFiles = [];
-        for (const file of req.files) {
+        const monthFolderId = await getOrCreateMonthFolder(drive);
+
+        const uploadPromises = req.files.map(async (file) => {
             const fileMetadata = {
                 name: file.originalname,
-                parents: [process.env.DRIVE_FOLDER_ID],
+                parents: [monthFolderId],
             };
 
             const media = {
@@ -115,13 +162,17 @@ const replyDoc = async (req, res) => {
                 fields: "id, name, mimeType, size",
             });
 
-            uploadedFiles.push({
+            return {
                 fileId: response.data.id,
                 fileName: response.data.name,
                 mimeType: response.data.mimeType,
                 size: response.data.size,
-            });
-        }
+                uploadedByName: req.user?.name || "Người dùng",
+                uploadDate: new Date()
+            };
+        });
+
+        const uploadedFiles = await Promise.all(uploadPromises);
 
         const newReplyDoc = new RepliedDoc({
             replyBy,
@@ -338,12 +389,13 @@ const updateRepliedDoc = async (req, res) => {
       const keptOldFiles = existingFiles;
   
       // 3. Upload file mới
+      const monthFolderId = await getOrCreateMonthFolder(drive);
       const uploadedFiles = [];
       if (req.files && req.files.length > 0) {
         for (const file of req.files) {
           const fileMetadata = {
             name: file.originalname,
-            parents: [process.env.DRIVE_FOLDER_ID],
+            parents: [monthFolderId],
           };
           const media = {
             mimeType: file.mimetype,
@@ -361,6 +413,8 @@ const updateRepliedDoc = async (req, res) => {
             fileName: response.data.name,
             mimeType: response.data.mimeType,
             size: response.data.size,
+            uploadedByName: req.user?.name || "Người dùng",
+            uploadDate: new Date()
           });
         }
       }
@@ -725,9 +779,9 @@ const getReviewedDoc = async (req, res) => {
   try {
     const { reviewerUser, status } = req.query;
 
-    // Mặc định: lọc theo các status liên quan đến review
+    // Mặc định: lọc theo các status liên quan đến review và lịch sử
     const filter = {
-      status: { $in: ["inReview", "rejectedByReviewer", "approvedByReviewer"] },
+      status: { $in: ["inReview", "rejectedByReviewer", "approvedByReviewer", "approved", "rejected"] },
     };
 
     // Nếu truyền reviewerUser → lọc theo reviewer
@@ -747,6 +801,8 @@ const getReviewedDoc = async (req, res) => {
       .populate('docVariant', 'docVariantName') // Populate nếu cần hiển thị tên loại VB
       .populate('repliedDoc', 'shortDescription docCode docNum') // Populate nếu cần hiển thị thông tin VB gốc
       .populate('replyBy', 'name email') // Populate để biết ai đã gửi trả lời;
+      .sort({ createdAt: -1 })
+      .limit(50);
 
     return res.json({
       isSuccess: true,
@@ -892,7 +948,46 @@ const countInReviewReplyDocs = async (req, res) => {
   }
 };
 
+const downloadDocument = async (req, res) => {
+    try {
+        const { fileId } = req.params;
+        if (!fileId) {
+            return res.status(400).json({ isSuccess: false, message: "Missing fileId" });
+        }
 
+        const auth = await authorize();
+        const drive = google.drive({ version: "v3", auth });
+
+        // Lấy thông tin metadata của file để set header (tên file, mimetype)
+        const fileMeta = await drive.files.get({
+            fileId: fileId,
+            fields: 'name, mimeType'
+        });
+
+        const driveRes = await drive.files.get(
+            { fileId: fileId, alt: 'media' },
+            { responseType: 'stream' }
+        );
+
+        res.setHeader('Content-disposition', `attachment; filename="${encodeURIComponent(fileMeta.data.name)}"`);
+        res.setHeader('Content-type', fileMeta.data.mimeType);
+
+        driveRes.data
+            .on('error', err => {
+                console.error("Lỗi khi stream file từ Drive:", err);
+                res.status(500).end();
+            })
+            .pipe(res);
+
+    } catch (error) {
+        console.error("❌ downloadDocument error:", error);
+        return res.status(500).json({
+            isSuccess: false,
+            message: "Lỗi khi tải file",
+            error: error.message,
+        });
+    }
+};
 
 module.exports = {
     replyDoc, //Trình ký văn bản
@@ -909,5 +1004,6 @@ module.exports = {
     sentToReview, // Gửi văn bản đã trình ký cho ban giám hiệu
     reviewerAction, // Hành động của người duyệt
     getReviewedDoc, // Lấy văn bản đã duyệt
-    countInReviewReplyDocs // Đếm số văn bản đang chờ duyệt của người duyệt
+    countInReviewReplyDocs, // Đếm số văn bản đang chờ duyệt của người duyệt
+    downloadDocument // Tải file về Frontend để gửi cho Local Service
 }

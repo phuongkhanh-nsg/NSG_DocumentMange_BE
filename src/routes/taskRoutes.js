@@ -1,12 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const taskController = require('../controller/task.Controller');
-// const { verifyToken } = require('../middleware/authMiddleware'); // if auth middleware exists
+const upload = require('../middleware/multer');
+const { verifyToken } = require('../middleware/authMiddleware');
 
-// If there's auth middleware, we should use it. For now, matching existing patterns.
-router.post('/', taskController.createTask);
-router.get('/', taskController.getTasks);
-router.put('/:taskId', taskController.updateTask);
-router.delete('/:taskId', taskController.deleteTask);
+router.post('/', verifyToken, upload.array('files', 10), taskController.createTask);
+router.get('/', verifyToken, taskController.getTasks);
+router.put('/:taskId', verifyToken, upload.array('files', 10), taskController.updateTask);
+router.delete('/:taskId', verifyToken, taskController.deleteTask);
 
 module.exports = router;

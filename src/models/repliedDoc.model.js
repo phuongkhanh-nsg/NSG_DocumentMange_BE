@@ -65,11 +65,18 @@ const replySchema = new mongoose.Schema(
           type: Date,
           default: Date.now,
         },
+        uploadedByName: {
+          type: String,
+        },
       }
     ],
     action: {
       type: String,
       enum: ["rejected", "approved","inReview", "rejectedByReviewer", "approvedByReviewer"],
+    },
+    isIssued: {
+      type: Boolean,
+      default: false,
     },
     reviewer: {
       type: mongoose.Schema.Types.ObjectId,

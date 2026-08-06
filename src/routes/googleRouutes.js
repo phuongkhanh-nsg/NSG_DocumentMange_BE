@@ -13,5 +13,9 @@ router.get("/callback", googleService.googleCallback);
 router.post("/calendar",verifyToken, googleService.addCalendarEvent);
 
 router.get("/check",verifyToken, googleService.checkGoogleAuth);    
+router.post("/revoke", verifyToken, googleService.revokeGoogleAuth);
+
+// Endpoint dnh cho dang nh?p b?ng Google (khong cn login try?c)
+router.get("/auth-login", googleService.getGoogleAuthLoginUrl);
 
 module.exports = router

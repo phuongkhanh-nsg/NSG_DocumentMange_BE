@@ -1,3 +1,13 @@
 node_modules
 .env
 
+test_*.js
+*.txt
+check*.js
+extract*.js
+clearTokens.js
+find_doc.js
+fix_positions.js
+import_db.js
+reset_password.js
+.env*
